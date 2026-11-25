@@ -67,6 +67,11 @@ private struct LibraryView: View {
     @State private var isLoading = false
     @State private var error: String?
     @State private var didLoad = false
+    @AppStorage("addedSources") private var addedSourcesRaw = ""
+
+    private var addedSources: Set<String> {
+        Set(addedSourcesRaw.split(separator: ",").map(String.init))
+    }
 
     private var categories: [Category] {
         Dictionary(grouping: streams) { $0.group.isEmpty ? "Sin categoría" : $0.group }
@@ -349,6 +354,21 @@ private struct LibraryView: View {
             }
             .listRowBackground(Color.xuperSurface)
 
+            Section("Listas gratuitas") {
+                NavigationLink {
+                    sourcesScreen
+                } label: {
+                    Label("Canales gratis por país y categoría", systemImage: "antenna.radiowaves.left.and.right")
+                }
+                Button {
+                    addSources(PublicSource.starter)
+                } label: {
+                    Label("Cargar Perú + Hispanoamérica", systemImage: "bolt.fill")
+                }
+                .disabled(isLoading)
+            }
+            .listRowBackground(Color.xuperSurface)
+
             Section("Mis listas") {
                 Button {
                     presentLinkSheet()
@@ -364,6 +384,7 @@ private struct LibraryView: View {
                     Button(role: .destructive) {
                         streams = []
                         chip = Self.featured
+                        addedSourcesRaw = ""
                         LibraryStore.save([])
                     } label: {
                         Label("Borrar biblioteca", systemImage: "trash")
@@ -402,11 +423,18 @@ private struct LibraryView: View {
         ContentUnavailableView {
             Label("Añade tu lista", systemImage: "rectangle.stack.badge.plus")
         } description: {
-            Text("Importa un archivo M3U o pega el enlace de tu lista.")
+            Text("Carga canales gratuitos o usa tu propia lista M3U.")
         } actions: {
+            Button {
+                addSources(PublicSource.starter)
+            } label: {
+                Label("Canales gratis (Perú + Hispanoamérica)", systemImage: "bolt.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isLoading)
             HStack {
                 Button("Pegar enlace") { presentLinkSheet() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.bordered)
                 Button("Importar archivo") { showsFiles = true }
                     .buttonStyle(.bordered)
             }
@@ -455,6 +483,80 @@ private struct LibraryView: View {
         }
     }
 
+    private var sourcesScreen: some View {
+        List {
+            Section {
+                Text("Listas públicas de canales gratuitos en abierto (iptv-org y Free-TV). Toca una para añadirla a tu biblioteca. Algunos canales pueden estar caídos o bloqueados por región.")
+                    .font(.footnote)
+                    .foregroundStyle(Color.xuperMuted)
+            }
+            .listRowBackground(Color.xuperSurface)
+
+            ForEach(PublicSource.sections) { section in
+                Section(section.title) {
+                    ForEach(section.sources) { source in
+                        sourceRow(source)
+                    }
+                }
+                .listRowBackground(Color.xuperSurface)
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(Color.xuperBackground)
+        .navigationTitle("Listas gratuitas")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func sourceRow(_ source: PublicSource) -> some View {
+        let isAdded = addedSources.contains(source.id)
+        return Button {
+            addSources([source])
+        } label: {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(source.name)
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(.white)
+                    Text(source.detail)
+                        .font(.footnote)
+                        .foregroundStyle(Color.xuperMuted)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: isAdded ? "checkmark.circle.fill" : "plus.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(isAdded ? Color.green : Color.xuperRed)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(isLoading)
+    }
+
+    private func addSources(_ sources: [PublicSource]) {
+        guard !isLoading else { return }
+        isLoading = true
+        Task {
+            defer { isLoading = false }
+            var merged = streams
+            var failed: [String] = []
+            var added = addedSources
+            for source in sources {
+                do {
+                    merged = StreamCatalog.merge(merged, try await StreamCatalog.download(source.url))
+                    added.insert(source.id)
+                } catch {
+                    failed.append(source.name)
+                }
+            }
+            streams = merged
+            addedSourcesRaw = added.sorted().joined(separator: ",")
+            LibraryStore.save(merged)
+            if !failed.isEmpty {
+                self.error = "No se pudo cargar: " + failed.joined(separator: ", ") + ". Revisa tu conexión e inténtalo de nuevo."
+            }
+        }
+    }
+
     private func presentLinkSheet() {
         address = ""
         linkError = false
@@ -491,6 +593,7 @@ private struct LibraryView: View {
 
     private func showImported(_ imported: [Stream]) {
         streams = imported
+        addedSourcesRaw = ""
         search = ""
         chip = Self.featured
         screen = .home

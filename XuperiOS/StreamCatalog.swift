@@ -182,3 +182,76 @@ enum LibraryStore {
 private extension String {
     var nonEmpty: String? { isEmpty ? nil : self }
 }
+
+/// Listas públicas y gratuitas de iptv-org (canales libres en abierto) y Free-TV/IPTV.
+struct PublicSource: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let detail: String
+    let url: URL
+
+    init(_ id: String, _ name: String, _ detail: String, path: String) {
+        self.id = id
+        self.name = name
+        self.detail = detail
+        self.url = URL(string: "https://raw.githubusercontent.com/iptv-org/iptv/gh-pages/" + path)!
+    }
+
+    init(_ id: String, _ name: String, _ detail: String, url: String) {
+        self.id = id
+        self.name = name
+        self.detail = detail
+        self.url = URL(string: url)!
+    }
+
+    struct Section: Identifiable {
+        let title: String
+        let sources: [PublicSource]
+        var id: String { title }
+    }
+
+    static let sections: [Section] = [
+        Section(title: "Perú y Latinoamérica", sources: [
+            PublicSource("pe", "Perú", "~220 canales", path: "countries/pe.m3u"),
+            PublicSource("hispam", "Hispanoamérica", "~2100 canales de la región", path: "regions/hispam.m3u"),
+            PublicSource("spa", "Todo en español", "~2400 canales", path: "languages/spa.m3u"),
+            PublicSource("mx", "México", "~180 canales", path: "countries/mx.m3u"),
+            PublicSource("ar", "Argentina", "~220 canales", path: "countries/ar.m3u"),
+            PublicSource("co", "Colombia", "~170 canales", path: "countries/co.m3u"),
+            PublicSource("cl", "Chile", "~220 canales", path: "countries/cl.m3u"),
+            PublicSource("ec", "Ecuador", "~120 canales", path: "countries/ec.m3u"),
+            PublicSource("ve", "Venezuela", "~100 canales", path: "countries/ve.m3u"),
+            PublicSource("es", "España", "~300 canales", path: "countries/es.m3u"),
+        ]),
+        Section(title: "Por categoría (todos los idiomas)", sources: [
+            PublicSource("movies", "Películas", "~770 canales", path: "categories/movies.m3u"),
+            PublicSource("series", "Series", "~480 canales", path: "categories/series.m3u"),
+            PublicSource("kids", "Kids", "~450 canales", path: "categories/kids.m3u"),
+            PublicSource("animation", "Animación", "~170 canales", path: "categories/animation.m3u"),
+            PublicSource("sports", "Deportes", "~520 canales", path: "categories/sports.m3u"),
+            PublicSource("documentary", "Documentales", "~240 canales", path: "categories/documentary.m3u"),
+            PublicSource("comedy", "Comedia", "~190 canales", path: "categories/comedy.m3u"),
+            PublicSource("classic", "Clásicos", "~80 canales", path: "categories/classic.m3u"),
+            PublicSource("entertainment", "Entretenimiento", "~900 canales", path: "categories/entertainment.m3u"),
+            PublicSource("music", "Música", "~800 canales", path: "categories/music.m3u"),
+            PublicSource("news", "Noticias", "~1050 canales", path: "categories/news.m3u"),
+        ]),
+        Section(title: "Mundo", sources: [
+            PublicSource("us", "Estados Unidos", "~1500 canales", path: "countries/us.m3u"),
+            PublicSource("freetv", "Free-TV (selección mundial)", "~2200 canales en abierto", url: "https://raw.githubusercontent.com/Free-TV/IPTV/master/playlist.m3u8"),
+        ]),
+    ]
+
+    /// Lo que se carga con un toque desde la pantalla vacía.
+    static var starter: [PublicSource] {
+        sections[0].sources.filter { $0.id == "pe" || $0.id == "hispam" }
+    }
+}
+
+extension StreamCatalog {
+    /// Une listas sin repetir enlaces.
+    static func merge(_ current: [Stream], _ new: [Stream]) -> [Stream] {
+        var seen = Set(current.map(\.url))
+        return current + new.filter { seen.insert($0.url).inserted }
+    }
+}
