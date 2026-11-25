@@ -1,0 +1,62 @@
+name: Compilar IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Versión de Xcode
+        run: xcodebuild -version
+
+      - name: Compilar para iPhone sin firma
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project XuperiOS.xcodeproj \
+            -scheme XuperiOS \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build | tee build.log | grep -E "error:|warning:|BUILD" || true
+          test -d build/Build/Products/Release-iphoneos/XuperiOS.app
+
+      - name: Empaquetar IPA
+        run: |
+          mkdir -p Payload dist
+          cp -R build/Build/Products/Release-iphoneos/XuperiOS.app Payload/
+          zip -qry dist/XuperiOS-unsigned.ipa Payload
+          ls -lh dist
+
+      - name: Subir IPA como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: XuperiOS-unsigned-ipa
+          path: dist/XuperiOS-unsigned.ipa
+
+      - name: Publicar en Releases (latest)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --cleanup-tag -y || true
+          gh release create latest dist/XuperiOS-unsigned.ipa \
+            --title "XuperiOS (compilación ${GITHUB_RUN_NUMBER})" \
+            --notes "IPA sin firmar. Fírmala e instálala con Sideloadly, AltStore o SideStore." \
+            --prerelease --target "$GITHUB_SHA"
+
+      - name: Registro de compilación (si falla)
+        if: failure()
+        run: tail -n 200 build.log || true
