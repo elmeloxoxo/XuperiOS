@@ -10,6 +10,8 @@ struct Stream: Identifiable, Hashable, Codable, Sendable {
     var tvgID: String? = nil
     /// Lista guardada de la que viene (SavedList.id).
     var sourceID: String? = nil
+    /// Cabeceras HTTP para reproducir (User-Agent, Referer…), de las fuentes personalizadas.
+    var headers: [String: String]? = nil
 
     /// País (dos letras) a partir del tvg-id, por ejemplo "ATV.pe@SD" -> "pe".
     var country: String? {
@@ -155,21 +157,24 @@ enum StreamCatalog {
     }
 
     /// Descarga una lista; si https falla por conexión, prueba la misma dirección con http.
-    static func download(_ url: URL, httpFallback: Bool) async throws -> [Stream] {
+    static func download(_ url: URL, httpFallback: Bool, headers: [String: String]? = nil) async throws -> [Stream] {
         do {
-            return try await download(url)
+            return try await download(url, headers: headers)
         } catch let error as URLError where httpFallback && url.scheme == "https" {
             var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
             components?.scheme = "http"
             guard let insecure = components?.url else { throw error }
-            return try await download(insecure)
+            return try await download(insecure, headers: headers)
         }
     }
 
-    static func download(_ url: URL) async throws -> [Stream] {
+    static func download(_ url: URL, headers: [String: String]? = nil) async throws -> [Stream] {
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
         request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) XuperiOS", forHTTPHeaderField: "User-Agent")
+        for (field, value) in headers ?? [:] {
+            request.setValue(value, forHTTPHeaderField: field)
+        }
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode),
@@ -182,7 +187,30 @@ enum StreamCatalog {
             guard data.count < byteLimit else { throw ImportError.tooLarge }
             data.append(byte)
         }
-        return try parse(data, base: target)
+        let parsed = try parse(data, base: target)
+        guard let headers, !headers.isEmpty else { return parsed }
+        return parsed.map { stream in
+            var copy = stream
+            copy.headers = headers
+            return copy
+        }
+    }
+
+    /// Vuelve a descargar el contenido de una lista guardada según su tipo.
+    static func fetch(_ list: SavedList) async throws -> [Stream] {
+        switch list.kind ?? .m3u {
+        case .xtream:
+            guard let login = list.xtream else { throw ImportError.serverResponse }
+            return try await Xtream.load(login)
+        case .hls:
+            guard let url = list.url else { throw ImportError.serverResponse }
+            return [Stream(title: list.name, group: "Señales HLS", url: url, headers: list.headers)]
+        case .file:
+            throw ImportError.invalidFile
+        case .m3u, .custom, .free:
+            guard let url = list.url else { throw ImportError.serverResponse }
+            return try await download(url, httpFallback: true, headers: list.headers)
+        }
     }
 
     static func readFile(_ url: URL) throws -> [Stream] {
@@ -222,11 +250,158 @@ enum StreamCatalog {
 
 /// Una lista que el usuario añadió (por enlace, archivo o desde Listas gratuitas).
 struct SavedList: Identifiable, Hashable, Codable, Sendable {
+    enum Kind: String, Codable, Sendable {
+        case m3u, hls, xtream, custom, file, free
+    }
+
     let id: String
     var name: String
     var url: URL?
     var count: Int
     var updated: Date
+    var kind: Kind? = nil
+    var xtream: Xtream.Login? = nil
+    var headers: [String: String]? = nil
+
+    var symbol: String {
+        switch kind ?? .m3u {
+        case .m3u: "list.bullet.rectangle"
+        case .hls: "dot.radiowaves.left.and.right"
+        case .xtream: "server.rack"
+        case .custom: "slider.horizontal.3"
+        case .file: "doc.fill"
+        case .free: "antenna.radiowaves.left.and.right"
+        }
+    }
+
+    var kindName: String {
+        switch kind ?? .m3u {
+        case .m3u: "Lista M3U"
+        case .hls: "Señal HLS"
+        case .xtream: "Xtream Codes"
+        case .custom: "Personalizada"
+        case .file: "Archivo"
+        case .free: "Gratis"
+        }
+    }
+
+    var canRefresh: Bool { kind != .file && url != nil }
+}
+
+/// Cliente Xtream Codes (player_api.php) para los datos que da tu proveedor IPTV.
+enum Xtream {
+    struct Login: Codable, Hashable, Sendable {
+        var server: String
+        var username: String
+        var password: String
+        var live = true
+        var movies = true
+    }
+
+    enum Failure: LocalizedError {
+        case server, auth, empty
+
+        var errorDescription: String? {
+            switch self {
+            case .server: "No se pudo conectar con el servidor Xtream. Revisa la dirección y el puerto (ej. servidor.com:8080)."
+            case .auth: "Usuario o contraseña incorrectos, o la cuenta está vencida."
+            case .empty: "La cuenta no tiene canales ni películas disponibles."
+            }
+        }
+    }
+
+    /// "servidor.com:8080/" -> "http://servidor.com:8080"
+    static func root(_ server: String) -> URL? {
+        guard let url = Stream.userURL(server.contains("://") ? server : "http://" + server),
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        components.path = ""
+        components.query = nil
+        components.fragment = nil
+        return components.url
+    }
+
+    static func load(_ login: Login) async throws -> [Stream] {
+        guard let root = root(login.server) else { throw Failure.server }
+        let info = try? await call(root, login, action: nil) as? [String: Any]
+        guard let info else { throw Failure.server }
+        let user = info["user_info"] as? [String: Any]
+        guard text(user?["auth"]) == "1" else { throw Failure.auth }
+
+        let user64 = login.username.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? login.username
+        let pass64 = login.password.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? login.password
+        var result: [Stream] = []
+
+        if login.live {
+            let groups = try await categories(root, login, action: "get_live_categories")
+            let items = (try await call(root, login, action: "get_live_streams") as? [[String: Any]]) ?? []
+            for item in items {
+                guard let id = text(item["stream_id"]), let name = text(item["name"]),
+                      let url = URL(string: "\(root.absoluteString)/live/\(user64)/\(pass64)/\(id).m3u8") else { continue }
+                result.append(Stream(
+                    title: name,
+                    group: groups[text(item["category_id"]) ?? ""] ?? "TV en vivo",
+                    url: url,
+                    logo: text(item["stream_icon"]).flatMap { Stream.webURL($0) },
+                    tvgID: text(item["epg_channel_id"])
+                ))
+            }
+        }
+
+        if login.movies {
+            let groups = try await categories(root, login, action: "get_vod_categories")
+            let items = (try await call(root, login, action: "get_vod_streams") as? [[String: Any]]) ?? []
+            for item in items {
+                let ext = text(item["container_extension"]) ?? "mp4"
+                guard let id = text(item["stream_id"]), let name = text(item["name"]),
+                      let url = URL(string: "\(root.absoluteString)/movie/\(user64)/\(pass64)/\(id).\(ext)") else { continue }
+                result.append(Stream(
+                    title: name,
+                    group: "Películas · " + (groups[text(item["category_id"]) ?? ""] ?? "Otras"),
+                    url: url,
+                    logo: text(item["stream_icon"]).flatMap { Stream.webURL($0) }
+                ))
+            }
+        }
+
+        guard !result.isEmpty else { throw Failure.empty }
+        return result
+    }
+
+    private static func categories(_ root: URL, _ login: Login, action: String) async throws -> [String: String] {
+        let items = (try await call(root, login, action: action) as? [[String: Any]]) ?? []
+        var names: [String: String] = [:]
+        for item in items {
+            if let id = text(item["category_id"]), let name = text(item["category_name"]) {
+                names[id] = name
+            }
+        }
+        return names
+    }
+
+    private static func call(_ root: URL, _ login: Login, action: String?) async throws -> Any {
+        var components = URLComponents(url: root.appendingPathComponent("player_api.php"), resolvingAgainstBaseURL: false)
+        var query = [
+            URLQueryItem(name: "username", value: login.username),
+            URLQueryItem(name: "password", value: login.password),
+        ]
+        if let action { query.append(URLQueryItem(name: "action", value: action)) }
+        components?.queryItems = query
+        guard let url = components?.url else { throw Failure.server }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 60
+        request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) XuperiOS", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { throw Failure.server }
+        return try JSONSerialization.jsonObject(with: data)
+    }
+
+    private static func text(_ value: Any?) -> String? {
+        switch value {
+        case let string as String: string.isEmpty ? nil : string
+        case let number as NSNumber: number.stringValue
+        default: nil
+        }
+    }
 }
 
 /// Guarda la biblioteca en el iPhone para que siga ahí al volver a abrir la app.

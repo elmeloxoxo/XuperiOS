@@ -59,16 +59,15 @@ private struct LibraryView: View {
     @State private var chip = LibraryView.featured
     @State private var search = ""
     @State private var selected: Stream?
-    @State private var showsLink = false
     @State private var showsFiles = false
-    @State private var address = ""
-    @State private var linkError = false
-    @State private var pendingLink: (URL, Bool)?
+    @State private var addMode: AddMode?
+    @State private var pendingAction: (() -> Void)?
+    @State private var form = SourceForm()
+    @State private var formError: String?
     @State private var isLoading = false
     @State private var error: String?
     @State private var didLoad = false
     @State private var lists: [SavedList] = []
-    @State private var listName = ""
     @State private var renaming: SavedList?
     @State private var renameText = ""
 
@@ -131,12 +130,13 @@ private struct LibraryView: View {
             lists = LibraryStore.loadLists()
             await Guide.shared.refresh()
         }
-        .sheet(isPresented: $showsLink, onDismiss: openPendingLink) { linkSheet }
+        .sheet(item: $addMode, onDismiss: runPendingAction) { mode in addSheet(mode) }
         .fileImporter(isPresented: $showsFiles, allowedContentTypes: [.item]) { result in
             do {
                 let file = try result.get()
                 let imported = try StreamCatalog.readFile(file)
-                saveList(name: file.deletingPathExtension().lastPathComponent, url: nil, streams: imported)
+                saveList(SavedList(id: UUID().uuidString, name: file.deletingPathExtension().lastPathComponent,
+                                   url: nil, count: 0, updated: Date(), kind: .file), streams: imported)
                 screen = .home
             } catch {
                 self.error = importMessage(error)
@@ -441,7 +441,7 @@ private struct LibraryView: View {
             .buttonStyle(.borderedProminent)
             .disabled(isLoading)
             HStack {
-                Button("Pegar enlace") { presentLinkSheet() }
+                Button("Pegar enlace") { present(.m3u) }
                     .buttonStyle(.bordered)
                 Button("Importar archivo") { showsFiles = true }
                     .buttonStyle(.bordered)
@@ -450,41 +450,84 @@ private struct LibraryView: View {
         }
     }
 
-    private var linkSheet: some View {
+    private func addSheet(_ mode: AddMode) -> some View {
         NavigationStack {
             Form {
-                TextField("Nombre de la lista (opcional)", text: $listName)
-                TextField("Enlace (ej. midominio.com/lista.m3u)", text: $address)
-                    .keyboardType(.URL)
-                    .textContentType(.URL)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .accessibilityLabel("Enlace")
-                    .onChange(of: address) { linkError = false }
-                if linkError {
-                    Text("Escribe un enlace válido, por ejemplo midominio.com/lista.m3u")
+                Section {
+                    TextField(mode == .hls ? "Nombre del canal" : "Nombre de la lista (opcional)", text: $form.name)
+                }
+                switch mode {
+                case .m3u, .hls, .custom:
+                    Section {
+                        TextField(mode == .hls ? "Enlace .m3u8 (ej. servidor.com/canal.m3u8)" : "Enlace (ej. midominio.com/lista.m3u)", text: $form.url)
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    } footer: {
+                        Text(mode.help)
+                    }
+                    if mode == .custom {
+                        Section {
+                            TextField("User-Agent (opcional)", text: $form.userAgent)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                            TextField("Referer (opcional)", text: $form.referer)
+                                .keyboardType(.URL)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                        } header: {
+                            Text("Identificación personalizada")
+                        } footer: {
+                            Text("Algunos servidores solo responden si la app se identifica con un User-Agent o un Referer concretos. Se usan al descargar la lista y al reproducir.")
+                        }
+                    }
+                case .xtream:
+                    Section {
+                        TextField("Servidor (ej. servidor.com:8080)", text: $form.url)
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        TextField("Usuario", text: $form.username)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        SecureField("Contraseña", text: $form.password)
+                    } footer: {
+                        Text(mode.help)
+                    }
+                    Section {
+                        Toggle("TV en vivo", isOn: $form.live)
+                        Toggle("Películas", isOn: $form.movies)
+                    }
+                }
+                if let formError {
+                    Text(formError)
                         .foregroundStyle(Color.xuperRed)
                 }
-                Button("Guardar y cargar lista M3U") { submitAddress(asPlaylist: true) }
-                    .fontWeight(.semibold)
-                Button("Reproducir video") { submitAddress(asPlaylist: false) }
+                Section {
+                    Button(mode == .hls ? "Guardar canal" : "Guardar y cargar") { submitForm(mode, playNow: false) }
+                        .fontWeight(.semibold)
+                    if mode == .hls {
+                        Button("Reproducir sin guardar") { submitForm(mode, playNow: true) }
+                    }
+                }
             }
-            .navigationTitle("Abrir enlace")
+            .navigationTitle(mode.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancelar") { showsLink = false }
+                    Button("Cancelar") { addMode = nil }
                 }
             }
         }
-        .presentationDetents([.medium])
     }
 
     @ToolbarContentBuilder
     private var sourceToolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
-                Button("Abrir enlace", systemImage: "link") { presentLinkSheet() }
+                ForEach(AddMode.allCases) { mode in
+                    Button(mode.title, systemImage: mode.symbol) { present(mode) }
+                }
                 Button("Importar archivo M3U", systemImage: "doc") { showsFiles = true }
             } label: {
                 Label("Añadir contenido", systemImage: "plus.circle.fill")
@@ -498,17 +541,27 @@ private struct LibraryView: View {
     private var listsScreen: some View {
         List {
             Section {
-                Button {
-                    presentLinkSheet()
-                } label: {
-                    Label("Añadir lista por enlace (URL)", systemImage: "link.badge.plus")
-                        .font(.headline)
-                        .foregroundStyle(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .background(Color.xuperRed, in: RoundedRectangle(cornerRadius: 12))
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+                    ForEach(AddMode.allCases) { mode in
+                        Button {
+                            present(mode)
+                        } label: {
+                            VStack(spacing: 6) {
+                                Image(systemName: mode.symbol)
+                                    .font(.title2)
+                                Text(mode.title)
+                                    .font(.subheadline.weight(.bold))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.8)
+                            }
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 16)
+                            .background(Color.xuperRed, in: RoundedRectangle(cornerRadius: 12))
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
-                .buttonStyle(.plain)
                 Button {
                     showsFiles = true
                 } label: {
@@ -567,7 +620,7 @@ private struct LibraryView: View {
 
     private func savedListRow(_ list: SavedList) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: list.url == nil ? "doc.fill" : "link")
+            Image(systemName: list.symbol)
                 .font(.title3)
                 .foregroundStyle(Color.xuperRed)
                 .frame(width: 28)
@@ -576,7 +629,7 @@ private struct LibraryView: View {
                     .font(.body.weight(.medium))
                     .foregroundStyle(.white)
                     .lineLimit(1)
-                Text("\(list.count) canales · \(list.updated.formatted(.relative(presentation: .named)))")
+                Text("\(list.kindName) · \(list.count) canales · \(list.updated.formatted(.relative(presentation: .named)))")
                     .font(.footnote)
                     .foregroundStyle(Color.xuperMuted)
             }
@@ -598,7 +651,7 @@ private struct LibraryView: View {
             .tint(.gray)
         }
         .swipeActions(edge: .leading) {
-            if list.url != nil {
+            if list.canRefresh {
                 Button {
                     refresh([list])
                 } label: {
@@ -608,7 +661,7 @@ private struct LibraryView: View {
             }
         }
         .contextMenu {
-            if list.url != nil {
+            if list.canRefresh {
                 Button("Actualizar", systemImage: "arrow.clockwise") { refresh([list]) }
             }
             Button("Renombrar", systemImage: "pencil") {
@@ -620,20 +673,18 @@ private struct LibraryView: View {
     }
 
     /// Guarda (o reemplaza) una lista y sus canales en la biblioteca.
-    private func saveList(id: String = UUID().uuidString, name: String, url: URL?, streams new: [Stream]) {
+    private func saveList(_ template: SavedList, streams new: [Stream]) {
+        let id = template.id
         let tagged = new.map { stream -> Stream in
             var copy = stream
             copy.sourceID = id
             return copy
         }
         streams = StreamCatalog.merge(streams.filter { $0.sourceID != id }, tagged)
-        let entry = SavedList(
-            id: id,
-            name: lists.first(where: { $0.id == id })?.name ?? (name.isEmpty ? "Lista" : name),
-            url: url,
-            count: tagged.count,
-            updated: Date()
-        )
+        var entry = template
+        entry.name = lists.first(where: { $0.id == id })?.name ?? (template.name.isEmpty ? "Lista" : template.name)
+        entry.count = tagged.count
+        entry.updated = Date()
         if let index = lists.firstIndex(where: { $0.id == id }) {
             lists[index] = entry
         } else {
@@ -656,7 +707,7 @@ private struct LibraryView: View {
         isLoading = true
         Task {
             defer { isLoading = false }
-            await download(targets.compactMap { list in list.url.map { (id: list.id, name: list.name, url: $0) } })
+            await load(targets)
         }
     }
 
@@ -664,21 +715,28 @@ private struct LibraryView: View {
         guard !isLoading else { return }
         isLoading = true
         defer { isLoading = false }
-        await download(lists.compactMap { list in list.url.map { (id: list.id, name: list.name, url: $0) } })
+        await load(lists.filter(\.canRefresh))
     }
 
-    private func download(_ items: [(id: String, name: String, url: URL)]) async {
+    /// Descarga cada lista y la guarda. Devuelve true si todas cargaron.
+    @discardableResult
+    private func load(_ targets: [SavedList]) async -> Bool {
         var failed: [String] = []
-        for item in items {
+        var lastError: Error?
+        for list in targets {
             do {
-                saveList(id: item.id, name: item.name, url: item.url, streams: try await StreamCatalog.download(item.url))
+                saveList(list, streams: try await StreamCatalog.fetch(list))
             } catch {
-                failed.append(item.name)
+                failed.append(list.name)
+                lastError = error
             }
         }
-        if !failed.isEmpty {
+        if failed.count == 1, let lastError {
+            self.error = "\(failed[0]): " + importMessage(lastError)
+        } else if !failed.isEmpty {
             self.error = "No se pudo cargar: " + failed.joined(separator: ", ") + ". Revisa el enlace o tu conexión."
         }
+        return failed.isEmpty
     }
 
     private var sourcesScreen: some View {
@@ -735,52 +793,136 @@ private struct LibraryView: View {
         isLoading = true
         Task {
             defer { isLoading = false }
-            await download(sources.map { (id: $0.id, name: $0.name, url: $0.url) })
+            await load(sources.map {
+                SavedList(id: $0.id, name: $0.name, url: $0.url, count: 0, updated: Date(), kind: .free)
+            })
         }
     }
 
-    private func presentLinkSheet() {
-        address = ""
-        listName = ""
-        linkError = false
-        showsLink = true
+    private func present(_ mode: AddMode) {
+        form = SourceForm()
+        formError = nil
+        addMode = mode
     }
 
-    private func submitAddress(asPlaylist: Bool) {
-        guard let url = Stream.userURL(address) else {
-            linkError = true
-            return
+    private func runPendingAction() {
+        let action = pendingAction
+        pendingAction = nil
+        action?()
+    }
+
+    private func submitForm(_ mode: AddMode, playNow: Bool) {
+        let name = form.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        var list: SavedList
+        switch mode {
+        case .xtream:
+            let server = form.url.trimmingCharacters(in: .whitespacesAndNewlines)
+            let user = form.username.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let root = Xtream.root(server) else {
+                formError = "Escribe la dirección del servidor, por ejemplo servidor.com:8080"
+                return
+            }
+            guard !user.isEmpty, !form.password.isEmpty else {
+                formError = "Escribe el usuario y la contraseña de tu cuenta."
+                return
+            }
+            guard form.live || form.movies else {
+                formError = "Activa TV en vivo, Películas o ambas."
+                return
+            }
+            list = SavedList(id: UUID().uuidString, name: name.isEmpty ? (root.host ?? "Xtream") : name,
+                             url: root, count: 0, updated: Date(), kind: .xtream,
+                             xtream: Xtream.Login(server: server, username: user, password: form.password,
+                                                  live: form.live, movies: form.movies))
+        case .m3u, .hls, .custom:
+            guard let url = Stream.userURL(form.url) else {
+                formError = "Escribe un enlace válido, por ejemplo midominio.com/lista.m3u"
+                return
+            }
+            var headers: [String: String] = [:]
+            let agent = form.userAgent.trimmingCharacters(in: .whitespacesAndNewlines)
+            let referer = form.referer.trimmingCharacters(in: .whitespacesAndNewlines)
+            if mode == .custom, !agent.isEmpty { headers["User-Agent"] = agent }
+            if mode == .custom, !referer.isEmpty { headers["Referer"] = referer }
+            let fallback = mode == .hls ? (url.deletingPathExtension().lastPathComponent) : (url.host ?? "Lista")
+            list = SavedList(id: UUID().uuidString, name: name.isEmpty ? fallback : name, url: url,
+                             count: 0, updated: Date(), kind: mode.kind, headers: headers.isEmpty ? nil : headers)
         }
-        pendingLink = (url, asPlaylist)
-        showsLink = false
-    }
 
-    private func openPendingLink() {
-        guard let (url, asPlaylist) = pendingLink else { return }
-        pendingLink = nil
-        if asPlaylist {
-            isLoading = true
-            Task {
-                defer { isLoading = false }
-                do {
-                    let name = listName.trimmingCharacters(in: .whitespacesAndNewlines)
-                    saveList(name: name.isEmpty ? (url.host ?? "Lista") : name, url: url,
-                             streams: try await StreamCatalog.download(url, httpFallback: true))
-                    screen = .lists
-                } catch {
-                    self.error = importMessage(error)
+        let target = list
+        if playNow, let url = target.url {
+            pendingAction = { selected = Stream(title: target.name, group: "", url: url) }
+        } else {
+            pendingAction = {
+                isLoading = true
+                Task {
+                    defer { isLoading = false }
+                    if await load([target]) {
+                        screen = mode == .hls ? .live : .home
+                    }
                 }
             }
-        } else {
-            let title = url.lastPathComponent.isEmpty ? url.host ?? "Video" : url.lastPathComponent
-            selected = Stream(title: title, group: "", url: url)
         }
+        addMode = nil
     }
 
     private func importMessage(_ error: Error) -> String {
-        (error as? StreamCatalog.ImportError)?.errorDescription
+        (error as? LocalizedError)?.errorDescription
             ?? "Comprueba que la lista esté disponible y vuelve a intentarlo."
     }
+}
+
+private enum AddMode: String, CaseIterable, Identifiable {
+    case m3u, hls, xtream, custom
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .m3u: "Lista M3U"
+        case .hls: "Señal HLS"
+        case .xtream: "Xtream Codes"
+        case .custom: "Personalizado"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .m3u: "list.bullet.rectangle"
+        case .hls: "dot.radiowaves.left.and.right"
+        case .xtream: "server.rack"
+        case .custom: "slider.horizontal.3"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .m3u: "Enlace directo a una lista .m3u o .m3u8 con varios canales. Si no pones https:// se añade solo."
+        case .hls: "Enlace de un solo canal o video en HLS (.m3u8). Se guarda en TV."
+        case .xtream: "Los datos que te dio tu proveedor IPTV: servidor con puerto, usuario y contraseña. Se cargan TV en vivo y películas."
+        case .custom: "Lista M3U de un servidor que exige identificarse."
+        }
+    }
+
+    var kind: SavedList.Kind {
+        switch self {
+        case .m3u: .m3u
+        case .hls: .hls
+        case .xtream: .xtream
+        case .custom: .custom
+        }
+    }
+}
+
+private struct SourceForm {
+    var name = ""
+    var url = ""
+    var username = ""
+    var password = ""
+    var userAgent = ""
+    var referer = ""
+    var live = true
+    var movies = true
 }
 
 // MARK: Componentes
@@ -984,7 +1126,12 @@ private struct PlaybackView: View {
         .preferredColorScheme(.dark)
         .task {
             guard player == nil else { return }
-            let playbackItem = AVPlayerItem(url: stream.url)
+            var options: [String: Any] = [:]
+            if let headers = stream.headers, !headers.isEmpty {
+                options["AVURLAssetHTTPHeaderFieldsKey"] = headers
+            }
+            let asset = AVURLAsset(url: stream.url, options: options)
+            let playbackItem = AVPlayerItem(asset: asset)
             let playback = AVPlayer(playerItem: playbackItem)
             item = playbackItem
             player = playback
