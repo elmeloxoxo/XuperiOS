@@ -8,6 +8,8 @@ struct Stream: Identifiable, Hashable, Codable, Sendable {
     let url: URL
     var logo: URL? = nil
     var tvgID: String? = nil
+    /// Lista guardada de la que viene (SavedList.id).
+    var sourceID: String? = nil
 
     /// País (dos letras) a partir del tvg-id, por ejemplo "ATV.pe@SD" -> "pe".
     var country: String? {
@@ -188,8 +190,32 @@ enum StreamCatalog {
     }
 }
 
+/// Una lista que el usuario añadió (por enlace, archivo o desde Listas gratuitas).
+struct SavedList: Identifiable, Hashable, Codable, Sendable {
+    let id: String
+    var name: String
+    var url: URL?
+    var count: Int
+    var updated: Date
+}
+
 /// Guarda la biblioteca en el iPhone para que siga ahí al volver a abrir la app.
 enum LibraryStore {
+    private static var listsURL: URL {
+        fileURL.deletingLastPathComponent().appendingPathComponent("lists.json")
+    }
+
+    static func loadLists() -> [SavedList] {
+        guard let data = try? Data(contentsOf: listsURL) else { return [] }
+        return (try? JSONDecoder().decode([SavedList].self, from: data)) ?? []
+    }
+
+    static func saveLists(_ lists: [SavedList]) {
+        if let data = try? JSONEncoder().encode(lists) {
+            try? data.write(to: listsURL, options: .atomic)
+        }
+    }
+
     private static var fileURL: URL {
         let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)

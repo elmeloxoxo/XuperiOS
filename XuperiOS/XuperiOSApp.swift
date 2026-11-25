@@ -49,7 +49,7 @@ private struct Category: Identifiable {
 
 private struct LibraryView: View {
     private enum Screen: Hashable {
-        case home, live, search, profile
+        case home, live, search, lists, profile
     }
 
     private static let featured = "DESTACADOS"
@@ -67,10 +67,13 @@ private struct LibraryView: View {
     @State private var isLoading = false
     @State private var error: String?
     @State private var didLoad = false
-    @AppStorage("addedSources") private var addedSourcesRaw = ""
+    @State private var lists: [SavedList] = []
+    @State private var listName = ""
+    @State private var renaming: SavedList?
+    @State private var renameText = ""
 
     private var addedSources: Set<String> {
-        Set(addedSourcesRaw.split(separator: ",").map(String.init))
+        Set(lists.map(\.id))
     }
 
     private var categories: [Category] {
@@ -100,6 +103,10 @@ private struct LibraryView: View {
                 .tabItem { Label("Buscar", systemImage: "magnifyingglass") }
                 .tag(Screen.search)
 
+            NavigationStack { listsScreen }
+                .tabItem { Label("Listas", systemImage: "list.bullet.rectangle.portrait.fill") }
+                .tag(Screen.lists)
+
             NavigationStack { profile }
                 .tabItem { Label("Perfil", systemImage: "person.crop.circle.fill") }
                 .tag(Screen.profile)
@@ -121,18 +128,37 @@ private struct LibraryView: View {
             guard !didLoad else { return }
             didLoad = true
             streams = LibraryStore.load()
+            lists = LibraryStore.loadLists()
             await Guide.shared.refresh()
         }
         .sheet(isPresented: $showsLink, onDismiss: openPendingLink) { linkSheet }
         .fileImporter(isPresented: $showsFiles, allowedContentTypes: [.item]) { result in
             do {
-                showImported(try StreamCatalog.readFile(result.get()))
+                let file = try result.get()
+                let imported = try StreamCatalog.readFile(file)
+                saveList(name: file.deletingPathExtension().lastPathComponent, url: nil, streams: imported)
+                screen = .home
             } catch {
                 self.error = importMessage(error)
             }
         }
         .fullScreenCover(item: $selected) { stream in
             PlaybackView(stream: stream)
+        }
+        .alert("Renombrar lista", isPresented: Binding(
+            get: { renaming != nil },
+            set: { if !$0 { renaming = nil } }
+        )) {
+            TextField("Nombre", text: $renameText)
+            Button("Guardar") {
+                let name = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let id = renaming?.id, !name.isEmpty, let index = lists.firstIndex(where: { $0.id == id }) {
+                    lists[index].name = name
+                    LibraryStore.saveLists(lists)
+                }
+                renaming = nil
+            }
+            Button("Cancelar", role: .cancel) { renaming = nil }
         }
         .alert("No se pudo abrir", isPresented: Binding(
             get: { error != nil },
@@ -157,11 +183,11 @@ private struct LibraryView: View {
                     emptyLibrary
                         .frame(maxWidth: .infinity)
                         .padding(.top, 20)
-                } else if chip == Self.featured {
-                    featuredContent
-                } else if let category = categories.first(where: { $0.name == chip }) {
+                } else if chip != Self.featured, let category = categories.first(where: { $0.name == chip }) {
                     PosterGrid(streams: category.streams) { selected = $0 }
                         .padding(.horizontal, 16)
+                } else {
+                    featuredContent
                 }
             }
             .padding(.bottom, 24)
@@ -355,40 +381,21 @@ private struct LibraryView: View {
             }
             .listRowBackground(Color.xuperSurface)
 
-            Section("Listas gratuitas") {
-                NavigationLink {
-                    sourcesScreen
-                } label: {
-                    Label("Canales gratis por país y categoría", systemImage: "antenna.radiowaves.left.and.right")
-                }
+            Section("Biblioteca") {
                 Button {
-                    addSources(PublicSource.starter)
+                    screen = .lists
                 } label: {
-                    Label("Cargar Perú + Hispanoamérica", systemImage: "bolt.fill")
-                }
-                .disabled(isLoading)
-            }
-            .listRowBackground(Color.xuperSurface)
-
-            Section("Mis listas") {
-                Button {
-                    presentLinkSheet()
-                } label: {
-                    Label("Abrir enlace o lista M3U", systemImage: "link")
-                }
-                Button {
-                    showsFiles = true
-                } label: {
-                    Label("Importar archivo M3U", systemImage: "doc.badge.plus")
+                    Label("Gestionar mis listas", systemImage: "list.bullet.rectangle.portrait")
                 }
                 if !streams.isEmpty {
                     Button(role: .destructive) {
                         streams = []
+                        lists = []
                         chip = Self.featured
-                        addedSourcesRaw = ""
                         LibraryStore.save([])
+                        LibraryStore.saveLists([])
                     } label: {
-                        Label("Borrar biblioteca", systemImage: "trash")
+                        Label("Borrar toda la biblioteca", systemImage: "trash")
                     }
                 }
             }
@@ -446,6 +453,7 @@ private struct LibraryView: View {
     private var linkSheet: some View {
         NavigationStack {
             Form {
+                TextField("Nombre de la lista (opcional)", text: $listName)
                 TextField("https://…", text: $address)
                     .keyboardType(.URL)
                     .textContentType(.URL)
@@ -457,7 +465,8 @@ private struct LibraryView: View {
                     Text("Introduce un enlace HTTP o HTTPS válido.")
                         .foregroundStyle(Color.xuperRed)
                 }
-                Button("Cargar lista M3U") { submitAddress(asPlaylist: true) }
+                Button("Guardar y cargar lista M3U") { submitAddress(asPlaylist: true) }
+                    .fontWeight(.semibold)
                 Button("Reproducir video") { submitAddress(asPlaylist: false) }
             }
             .navigationTitle("Abrir enlace")
@@ -481,6 +490,194 @@ private struct LibraryView: View {
                 Label("Añadir contenido", systemImage: "plus.circle.fill")
             }
             .disabled(isLoading)
+        }
+    }
+
+    // MARK: Listas
+
+    private var listsScreen: some View {
+        List {
+            Section {
+                Button {
+                    presentLinkSheet()
+                } label: {
+                    Label("Añadir lista por enlace (URL)", systemImage: "link.badge.plus")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(Color.xuperRed, in: RoundedRectangle(cornerRadius: 12))
+                }
+                .buttonStyle(.plain)
+                Button {
+                    showsFiles = true
+                } label: {
+                    Label("Importar archivo M3U", systemImage: "doc.badge.plus")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(Color.xuperRaised, in: RoundedRectangle(cornerRadius: 12))
+                }
+                .buttonStyle(.plain)
+            }
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+            .disabled(isLoading)
+
+            Section {
+                if lists.isEmpty {
+                    Text("Todavía no has guardado listas. Añade una con el botón de arriba o elige una gratuita.")
+                        .font(.footnote)
+                        .foregroundStyle(Color.xuperMuted)
+                }
+                ForEach(lists) { list in
+                    savedListRow(list)
+                }
+            } header: {
+                Text("Mis listas (\(lists.count))")
+            } footer: {
+                if !lists.isEmpty {
+                    Text("Desliza una lista para actualizarla, renombrarla o eliminarla. También puedes mantenerla pulsada.")
+                }
+            }
+            .listRowBackground(Color.xuperSurface)
+
+            Section("Gratis") {
+                NavigationLink {
+                    sourcesScreen
+                } label: {
+                    Label("Listas gratuitas por país y categoría", systemImage: "antenna.radiowaves.left.and.right")
+                }
+                Button {
+                    addSources(PublicSource.starter)
+                } label: {
+                    Label("Cargar Perú + Hispanoamérica", systemImage: "bolt.fill")
+                }
+                .disabled(isLoading)
+            }
+            .listRowBackground(Color.xuperSurface)
+        }
+        .scrollContentBackground(.hidden)
+        .background(Color.xuperBackground)
+        .navigationTitle("Mis listas")
+        .navigationBarTitleDisplayMode(.inline)
+        .refreshable { await refreshAll() }
+    }
+
+    private func savedListRow(_ list: SavedList) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: list.url == nil ? "doc.fill" : "link")
+                .font(.title3)
+                .foregroundStyle(Color.xuperRed)
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(list.name)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Text("\(list.count) canales · \(list.updated.formatted(.relative(presentation: .named)))")
+                    .font(.footnote)
+                    .foregroundStyle(Color.xuperMuted)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 4)
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+                deleteList(list)
+            } label: {
+                Label("Eliminar", systemImage: "trash")
+            }
+            Button {
+                renameText = list.name
+                renaming = list
+            } label: {
+                Label("Renombrar", systemImage: "pencil")
+            }
+            .tint(.gray)
+        }
+        .swipeActions(edge: .leading) {
+            if list.url != nil {
+                Button {
+                    refresh([list])
+                } label: {
+                    Label("Actualizar", systemImage: "arrow.clockwise")
+                }
+                .tint(.blue)
+            }
+        }
+        .contextMenu {
+            if list.url != nil {
+                Button("Actualizar", systemImage: "arrow.clockwise") { refresh([list]) }
+            }
+            Button("Renombrar", systemImage: "pencil") {
+                renameText = list.name
+                renaming = list
+            }
+            Button("Eliminar", systemImage: "trash", role: .destructive) { deleteList(list) }
+        }
+    }
+
+    /// Guarda (o reemplaza) una lista y sus canales en la biblioteca.
+    private func saveList(id: String = UUID().uuidString, name: String, url: URL?, streams new: [Stream]) {
+        let tagged = new.map { stream -> Stream in
+            var copy = stream
+            copy.sourceID = id
+            return copy
+        }
+        streams = StreamCatalog.merge(streams.filter { $0.sourceID != id }, tagged)
+        let entry = SavedList(
+            id: id,
+            name: lists.first(where: { $0.id == id })?.name ?? (name.isEmpty ? "Lista" : name),
+            url: url,
+            count: tagged.count,
+            updated: Date()
+        )
+        if let index = lists.firstIndex(where: { $0.id == id }) {
+            lists[index] = entry
+        } else {
+            lists.append(entry)
+        }
+        search = ""
+        LibraryStore.save(streams)
+        LibraryStore.saveLists(lists)
+    }
+
+    private func deleteList(_ list: SavedList) {
+        streams.removeAll { $0.sourceID == list.id }
+        lists.removeAll { $0.id == list.id }
+        LibraryStore.save(streams)
+        LibraryStore.saveLists(lists)
+    }
+
+    private func refresh(_ targets: [SavedList]) {
+        guard !isLoading else { return }
+        isLoading = true
+        Task {
+            defer { isLoading = false }
+            await download(targets.compactMap { list in list.url.map { (id: list.id, name: list.name, url: $0) } })
+        }
+    }
+
+    private func refreshAll() async {
+        guard !isLoading else { return }
+        isLoading = true
+        defer { isLoading = false }
+        await download(lists.compactMap { list in list.url.map { (id: list.id, name: list.name, url: $0) } })
+    }
+
+    private func download(_ items: [(id: String, name: String, url: URL)]) async {
+        var failed: [String] = []
+        for item in items {
+            do {
+                saveList(id: item.id, name: item.name, url: item.url, streams: try await StreamCatalog.download(item.url))
+            } catch {
+                failed.append(item.name)
+            }
+        }
+        if !failed.isEmpty {
+            self.error = "No se pudo cargar: " + failed.joined(separator: ", ") + ". Revisa el enlace o tu conexión."
         }
     }
 
@@ -538,28 +735,13 @@ private struct LibraryView: View {
         isLoading = true
         Task {
             defer { isLoading = false }
-            var merged = streams
-            var failed: [String] = []
-            var added = addedSources
-            for source in sources {
-                do {
-                    merged = StreamCatalog.merge(merged, try await StreamCatalog.download(source.url))
-                    added.insert(source.id)
-                } catch {
-                    failed.append(source.name)
-                }
-            }
-            streams = merged
-            addedSourcesRaw = added.sorted().joined(separator: ",")
-            LibraryStore.save(merged)
-            if !failed.isEmpty {
-                self.error = "No se pudo cargar: " + failed.joined(separator: ", ") + ". Revisa tu conexión e inténtalo de nuevo."
-            }
+            await download(sources.map { (id: $0.id, name: $0.name, url: $0.url) })
         }
     }
 
     private func presentLinkSheet() {
         address = ""
+        listName = ""
         linkError = false
         showsLink = true
     }
@@ -581,7 +763,10 @@ private struct LibraryView: View {
             Task {
                 defer { isLoading = false }
                 do {
-                    showImported(try await StreamCatalog.download(url))
+                    let name = listName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    saveList(name: name.isEmpty ? (url.host ?? "Lista") : name, url: url,
+                             streams: try await StreamCatalog.download(url))
+                    screen = .lists
                 } catch {
                     self.error = importMessage(error)
                 }
@@ -590,15 +775,6 @@ private struct LibraryView: View {
             let title = url.lastPathComponent.isEmpty ? url.host ?? "Video" : url.lastPathComponent
             selected = Stream(title: title, group: "", url: url)
         }
-    }
-
-    private func showImported(_ imported: [Stream]) {
-        streams = imported
-        addedSourcesRaw = ""
-        search = ""
-        chip = Self.featured
-        screen = .home
-        LibraryStore.save(imported)
     }
 
     private func importMessage(_ error: Error) -> String {
