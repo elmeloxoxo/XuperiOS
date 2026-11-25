@@ -121,6 +121,7 @@ private struct LibraryView: View {
             guard !didLoad else { return }
             didLoad = true
             streams = LibraryStore.load()
+            await Guide.shared.refresh()
         }
         .sheet(isPresented: $showsLink, onDismiss: openPendingLink) { linkSheet }
         .fileImporter(isPresented: $showsFiles, allowedContentTypes: [.item]) { result in
@@ -706,7 +707,12 @@ private struct ChannelRow: View {
                         .font(.body.weight(.medium))
                         .foregroundStyle(.white)
                         .lineLimit(1)
-                    if !stream.group.isEmpty {
+                    if let now = Guide.shared.schedule(for: stream).now {
+                        Text("Ahora: \(now.t)")
+                            .font(.footnote.weight(.medium))
+                            .foregroundStyle(Color.xuperRed)
+                            .lineLimit(1)
+                    } else if !stream.group.isEmpty {
                         Text(stream.group)
                             .font(.footnote)
                             .foregroundStyle(Color.xuperMuted)
@@ -776,11 +782,26 @@ private struct PlaybackView: View {
                         .background(.black.opacity(0.55), in: Circle())
                 }
                 .accessibilityLabel("Cerrar")
-                Text(stream.title)
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                    .shadow(radius: 4)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(stream.title)
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    let schedule = Guide.shared.schedule(for: stream)
+                    if let now = schedule.now {
+                        Text("Ahora: \(now.t) · hasta \(now.end.formatted(date: .omitted, time: .shortened))")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.xuperRed)
+                            .lineLimit(1)
+                    }
+                    if let next = schedule.next {
+                        Text("Siguiente: \(next.t) · \(next.start.formatted(date: .omitted, time: .shortened))")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.75))
+                            .lineLimit(1)
+                    }
+                }
+                .shadow(radius: 4)
             }
             .padding(16)
         }

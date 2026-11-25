@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 struct Stream: Identifiable, Hashable, Codable, Sendable {
     var id = UUID()
@@ -6,6 +7,13 @@ struct Stream: Identifiable, Hashable, Codable, Sendable {
     let group: String
     let url: URL
     var logo: URL? = nil
+    var tvgID: String? = nil
+
+    /// Clave para buscar en la guía: tvg-id en minúsculas y sin el sufijo "@SD".
+    var guideKey: String? {
+        guard let tvgID, let base = tvgID.split(separator: "@").first, !base.isEmpty else { return nil }
+        return base.lowercased()
+    }
 
     static let demo = Stream(
         title: "Bip Bop",
@@ -72,6 +80,7 @@ enum StreamCatalog {
         var title = ""
         var group = ""
         var logo: URL?
+        var tvgID: String?
         var isHLS = false
         for rawLine in lines {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
@@ -83,6 +92,7 @@ enum StreamCatalog {
                 title = entryTitle(line)
                 group = attribute("group-title", in: line) ?? ""
                 logo = attribute("tvg-logo", in: line).flatMap { Stream.webURL($0) }
+                tvgID = attribute("tvg-id", in: line)
                 continue
             }
             if line.hasPrefix("#EXTGRP:") {
@@ -90,17 +100,19 @@ enum StreamCatalog {
                 continue
             }
             guard !line.isEmpty, !line.hasPrefix("#") else { continue }
-            if let url = Stream.webURL(line, relativeTo: hasHeader ? base : nil) {
+            if let url = Stream.webURL(line, relativeTo: hasHeader ? base : nil), isPlayable(url) {
                 streams.append(Stream(
                     title: title.isEmpty ? url.lastPathComponent.nonEmpty ?? url.host ?? "Señal" : title,
                     group: group,
                     url: url,
-                    logo: logo
+                    logo: logo,
+                    tvgID: tvgID
                 ))
             }
             title = ""
             group = ""
             logo = nil
+            tvgID = nil
         }
         if isHLS {
             guard let base else { throw ImportError.localHLS }
@@ -147,6 +159,12 @@ enum StreamCatalog {
             }
         }
         return ""
+    }
+
+    /// AVPlayer no reproduce páginas de YouTube ni Twitch, así que se omiten.
+    private static func isPlayable(_ url: URL) -> Bool {
+        let host = url.host?.lowercased() ?? ""
+        return !["youtube.com", "youtu.be", "twitch.tv", "dailymotion.com"].contains { host == $0 || host.hasSuffix("." + $0) }
     }
 
     private static func attribute(_ name: String, in line: String) -> String? {
@@ -223,6 +241,22 @@ struct PublicSource: Identifiable, Hashable {
             PublicSource("ve", "Venezuela", "~100 canales", path: "countries/ve.m3u"),
             PublicSource("es", "España", "~300 canales", path: "countries/es.m3u"),
         ]),
+        Section(title: "Free-TV (canales oficiales en abierto)", sources: [
+            PublicSource.freeTV("ftv-pe", "Perú (Free-TV)", "Canales nacionales en abierto", "peru"),
+            PublicSource.freeTV("ftv-mx", "México (Free-TV)", "Canales nacionales en abierto", "mexico"),
+            PublicSource.freeTV("ftv-ar", "Argentina (Free-TV)", "Canales nacionales en abierto", "argentina"),
+            PublicSource.freeTV("ftv-cl", "Chile (Free-TV)", "Canales nacionales en abierto", "chile"),
+            PublicSource.freeTV("ftv-ve", "Venezuela (Free-TV)", "Canales nacionales en abierto", "venezuela"),
+            PublicSource.freeTV("ftv-py", "Paraguay (Free-TV)", "Canales nacionales en abierto", "paraguay"),
+            PublicSource.freeTV("ftv-cr", "Costa Rica (Free-TV)", "Canales nacionales en abierto", "costa_rica"),
+            PublicSource.freeTV("ftv-do", "República Dominicana (Free-TV)", "Canales nacionales en abierto", "dominican_republic"),
+            PublicSource.freeTV("ftv-es", "España (Free-TV)", "TDT y autonómicas", "spain"),
+            PublicSource.freeTV("ftv-esvod", "España a la carta (Free-TV)", "Contenido bajo demanda gratuito", "spain_vod"),
+            PublicSource.freeTV("ftv-movies", "Películas (Free-TV)", "Canales de cine gratuitos", "zz_movies"),
+            PublicSource.freeTV("ftv-newses", "Noticias en español (Free-TV)", "Canales de noticias", "zz_news_es"),
+            PublicSource.freeTV("ftv-docs", "Documentales (Free-TV)", "Canales documentales", "zz_documentaries_en"),
+            PublicSource.freeTV("ftv-usvod", "EE. UU. a la carta (Free-TV)", "Contenido bajo demanda gratuito", "usa_vod"),
+        ]),
         Section(title: "Por categoría (todos los idiomas)", sources: [
             PublicSource("movies", "Películas", "~770 canales", path: "categories/movies.m3u"),
             PublicSource("series", "Series", "~480 canales", path: "categories/series.m3u"),
@@ -242,9 +276,13 @@ struct PublicSource: Identifiable, Hashable {
         ]),
     ]
 
+    static func freeTV(_ id: String, _ name: String, _ detail: String, _ file: String) -> PublicSource {
+        PublicSource(id, name, detail, url: "https://raw.githubusercontent.com/Free-TV/IPTV/master/playlists/playlist_\(file).m3u8")
+    }
+
     /// Lo que se carga con un toque desde la pantalla vacía.
     static var starter: [PublicSource] {
-        sections[0].sources.filter { $0.id == "pe" || $0.id == "hispam" }
+        sections.flatMap(\.sources).filter { ["pe", "hispam", "ftv-pe"].contains($0.id) }
     }
 }
 
@@ -253,5 +291,72 @@ extension StreamCatalog {
     static func merge(_ current: [Stream], _ new: [Stream]) -> [Stream] {
         var seen = Set(current.map(\.url))
         return current + new.filter { seen.insert($0.url).inserted }
+    }
+}
+
+// MARK: Guía de programación
+
+struct Programme: Codable, Hashable, Sendable {
+    let s: Double
+    let e: Double
+    let t: String
+
+    var start: Date { Date(timeIntervalSince1970: s) }
+    var end: Date { Date(timeIntervalSince1970: e) }
+}
+
+struct GuideFile: Codable, Sendable {
+    let generated: Double
+    let channels: [String: [Programme]]
+}
+
+/// Guía "Ahora / Siguiente". El archivo lo genera .github/workflows/epg.yml.
+@Observable
+@MainActor
+final class Guide {
+    static let shared = Guide()
+    static let url = URL(string: "https://github.com/elmeloxoxo/XuperiOS/releases/download/epg/epg.json")!
+
+    private(set) var channels: [String: [Programme]] = [:]
+    private var loadedAt: Date?
+
+    private static var cacheURL: URL {
+        let folder = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        return folder.appendingPathComponent("epg.json")
+    }
+
+    func refresh() async {
+        if let loadedAt, Date().timeIntervalSince(loadedAt) < 3 * 3600 { return }
+        if channels.isEmpty, let cached = await Self.decode(contentsOf: Self.cacheURL) {
+            channels = cached.channels
+        }
+        var request = URLRequest(url: Self.url)
+        request.timeoutInterval = 60
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let file = await Self.decode(data) else { return }
+        channels = file.channels
+        loadedAt = Date()
+        try? data.write(to: Self.cacheURL, options: .atomic)
+    }
+
+    func schedule(for stream: Stream, at date: Date = Date()) -> (now: Programme?, next: Programme?) {
+        guard let key = stream.guideKey, let list = channels[key] else { return (nil, nil) }
+        let time = date.timeIntervalSince1970
+        guard let index = list.firstIndex(where: { $0.e > time }) else { return (nil, nil) }
+        let current = list[index].s <= time ? list[index] : nil
+        let nextIndex = current == nil ? index : index + 1
+        return (current, nextIndex < list.count ? list[nextIndex] : nil)
+    }
+
+    nonisolated private static func decode(contentsOf url: URL) async -> GuideFile? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return await decode(data)
+    }
+
+    nonisolated private static func decode(_ data: Data) async -> GuideFile? {
+        await Task.detached(priority: .utility) {
+            try? JSONDecoder().decode(GuideFile.self, from: data)
+        }.value
     }
 }

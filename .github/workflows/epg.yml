@@ -1,0 +1,35 @@
+name: Actualizar guía (EPG)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - scripts/build_epg.py
+      - .github/workflows/epg.yml
+
+permissions:
+  contents: write
+
+jobs:
+  epg:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generar epg.json
+        run: python3 scripts/build_epg.py epg.json && ls -lh epg.json
+
+      - name: Comprobar listas FAST (Pluto, Plex, Samsung)
+        run: |
+          for u in PlutoTV/mx.m3u8 PlutoTV/es.m3u8 PlutoTV/all.m3u8 Plex/mx.m3u8 Plex/es.m3u8 SamsungTVPlus/mx.m3u8 SamsungTVPlus/es.m3u8 SamsungTVPlus/all.m3u8 Roku/all.m3u8; do
+            n=$(curl -sL "https://i.mjh.nz/$u" | grep -c '^#EXTINF' || true)
+            echo "LISTA $u $n"
+          done
+
+      - name: Publicar en Releases (epg)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view epg >/dev/null 2>&1 || gh release create epg --title "Guía de programación" --notes "epg.json para XuperiOS, se actualiza al ejecutar este workflow." --latest=false
+          gh release upload epg epg.json --clobber
