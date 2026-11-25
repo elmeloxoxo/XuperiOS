@@ -454,7 +454,7 @@ private struct LibraryView: View {
         NavigationStack {
             Form {
                 TextField("Nombre de la lista (opcional)", text: $listName)
-                TextField("https://…", text: $address)
+                TextField("Enlace (ej. midominio.com/lista.m3u)", text: $address)
                     .keyboardType(.URL)
                     .textContentType(.URL)
                     .textInputAutocapitalization(.never)
@@ -462,7 +462,7 @@ private struct LibraryView: View {
                     .accessibilityLabel("Enlace")
                     .onChange(of: address) { linkError = false }
                 if linkError {
-                    Text("Introduce un enlace HTTP o HTTPS válido.")
+                    Text("Escribe un enlace válido, por ejemplo midominio.com/lista.m3u")
                         .foregroundStyle(Color.xuperRed)
                 }
                 Button("Guardar y cargar lista M3U") { submitAddress(asPlaylist: true) }
@@ -747,7 +747,7 @@ private struct LibraryView: View {
     }
 
     private func submitAddress(asPlaylist: Bool) {
-        guard let url = Stream.webURL(address) else {
+        guard let url = Stream.userURL(address) else {
             linkError = true
             return
         }
@@ -765,7 +765,7 @@ private struct LibraryView: View {
                 do {
                     let name = listName.trimmingCharacters(in: .whitespacesAndNewlines)
                     saveList(name: name.isEmpty ? (url.host ?? "Lista") : name, url: url,
-                             streams: try await StreamCatalog.download(url))
+                             streams: try await StreamCatalog.download(url, httpFallback: true))
                     screen = .lists
                 } catch {
                     self.error = importMessage(error)

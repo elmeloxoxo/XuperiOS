@@ -46,6 +46,17 @@ struct Stream: Identifiable, Hashable, Codable, Sendable {
         return url
     }
 
+    /// Para lo que escribe el usuario: acepta "lala.tv/lista.m3u" y le añade https:// si falta.
+    static func userURL(_ text: String) -> URL? {
+        var input = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty, !input.contains(" ") else { return nil }
+        if !input.contains("://") {
+            input = "https://" + input.drop(while: { $0 == "/" })
+        }
+        guard let url = webURL(input), let host = url.host, host.contains(".") || host == "localhost" else { return nil }
+        return url
+    }
+
     /// Iniciales para la portada cuando la lista no trae imagen.
     var initials: String {
         let words = title.split(whereSeparator: { $0 == " " || $0 == "-" || $0 == "_" })
@@ -64,7 +75,7 @@ enum StreamCatalog {
     static let byteLimit = 16 * 1024 * 1024
 
     enum ImportError: LocalizedError {
-        case invalidFile, emptyList, tooLarge, serverResponse, localHLS
+        case invalidFile, emptyList, tooLarge, serverResponse, localHLS, webPage
 
         var errorDescription: String? {
             switch self {
@@ -73,6 +84,7 @@ enum StreamCatalog {
             case .tooLarge: "La lista supera los 16 MB."
             case .serverResponse: "El servidor no devolvió una lista válida."
             case .localHLS: "Abre el enlace del video para reproducir este manifiesto HLS."
+            case .webPage: "Ese enlace abre una página web, no una lista M3U. Necesitas el enlace directo de la lista (suele terminar en .m3u o .m3u8)."
             }
         }
     }
@@ -81,6 +93,11 @@ enum StreamCatalog {
         guard data.count <= byteLimit else { throw ImportError.tooLarge }
         guard let text = String(data: data, encoding: .utf8)
                 ?? String(data: data, encoding: .isoLatin1) else { throw ImportError.invalidFile }
+
+        let start = text.trimmingCharacters(in: CharacterSet(charactersIn: "\u{FEFF}").union(.whitespacesAndNewlines))
+        if start.hasPrefix("<") {
+            throw ImportError.webPage
+        }
 
         let lines = text.trimmingCharacters(in: CharacterSet(charactersIn: "\u{FEFF}"))
             .split(whereSeparator: \.isNewline)
@@ -137,9 +154,22 @@ enum StreamCatalog {
         return streams
     }
 
+    /// Descarga una lista; si https falla por conexión, prueba la misma dirección con http.
+    static func download(_ url: URL, httpFallback: Bool) async throws -> [Stream] {
+        do {
+            return try await download(url)
+        } catch let error as URLError where httpFallback && url.scheme == "https" {
+            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            components?.scheme = "http"
+            guard let insecure = components?.url else { throw error }
+            return try await download(insecure)
+        }
+    }
+
     static func download(_ url: URL) async throws -> [Stream] {
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
+        request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) XuperiOS", forHTTPHeaderField: "User-Agent")
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode),
