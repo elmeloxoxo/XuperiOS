@@ -24,5 +24,5 @@ Trabaja desde esta carpeta. Revisa los cambios existentes antes de editar y cons
 ## Estado (2026-11-25, Claude Code)
 
 - Renombrado Marea → XuperiOS, nueva interfaz, icono, persistencia de la biblioteca, soporte HTTP y `tvg-logo`, workflow de GitHub Actions.
-- Sin verificar todavía: no se ha compilado (no hay macOS en el entorno). La primera ejecución del workflow es la primera compilación real.
-- Pendiente: subir esta carpeta a un repositorio de GitHub, ejecutar el workflow, instalar el IPA en el iPhone 11 con Sideloadly/AltStore y probar una lista M3U.
+- Repositorio: https://github.com/elmeloxoxo/XuperiOS (rama main). El workflow compiló sin errores con Xcode 16.4 (ejecución 45557796276); el IPA sin firmar está en Releases → latest.
+- Pendiente: instalar el IPA en el iPhone 11 con Sideloadly/AltStore y probar una lista M3U real.
