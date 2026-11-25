@@ -9,10 +9,23 @@ struct Stream: Identifiable, Hashable, Codable, Sendable {
     var logo: URL? = nil
     var tvgID: String? = nil
 
-    /// Clave para buscar en la guía: tvg-id en minúsculas y sin el sufijo "@SD".
-    var guideKey: String? {
-        guard let tvgID, let base = tvgID.split(separator: "@").first, !base.isEmpty else { return nil }
-        return base.lowercased()
+    /// País (dos letras) a partir del tvg-id, por ejemplo "ATV.pe@SD" -> "pe".
+    var country: String? {
+        guard let tvgID, let base = tvgID.split(separator: "@").first,
+              let suffix = base.split(separator: ".").last, suffix.count == 2, base.contains(".") else { return nil }
+        return suffix.lowercased()
+    }
+
+    /// Nombre simplificado para cruzar con la guía. Debe coincidir con normalize() en scripts/build_epg.py.
+    static func normalizedName(_ name: String) -> String {
+        let folded = name.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil).lowercased()
+        let cleaned = folded.replacingOccurrences(of: #"\([^)]*\)|\[[^\]]*\]"#, with: "", options: .regularExpression)
+        let drop: Set<String> = ["hd", "sd", "fhd", "uhd", "4k", "tv", "television", "channel", "canal"]
+        return cleaned
+            .split(whereSeparator: { !($0.isASCII && ($0.isLetter || $0.isNumber || $0 == "+")) })
+            .map(String.init)
+            .filter { !drop.contains($0) }
+            .joined()
     }
 
     static let demo = Stream(
@@ -308,6 +321,7 @@ struct Programme: Codable, Hashable, Sendable {
 struct GuideFile: Codable, Sendable {
     let generated: Double
     let channels: [String: [Programme]]
+    let aliases: [String: String]?
 }
 
 /// Guía "Ahora / Siguiente". El archivo lo genera .github/workflows/epg.yml.
@@ -318,6 +332,7 @@ final class Guide {
     static let url = URL(string: "https://github.com/elmeloxoxo/XuperiOS/releases/download/epg/epg.json")!
 
     private(set) var channels: [String: [Programme]] = [:]
+    private var aliases: [String: String] = [:]
     private var loadedAt: Date?
 
     private static var cacheURL: URL {
@@ -329,6 +344,7 @@ final class Guide {
         if let loadedAt, Date().timeIntervalSince(loadedAt) < 3 * 3600 { return }
         if channels.isEmpty, let cached = await Self.decode(contentsOf: Self.cacheURL) {
             channels = cached.channels
+            aliases = cached.aliases ?? [:]
         }
         var request = URLRequest(url: Self.url)
         request.timeoutInterval = 60
@@ -336,12 +352,17 @@ final class Guide {
               (response as? HTTPURLResponse)?.statusCode == 200,
               let file = await Self.decode(data) else { return }
         channels = file.channels
+        aliases = file.aliases ?? [:]
         loadedAt = Date()
         try? data.write(to: Self.cacheURL, options: .atomic)
     }
 
     func schedule(for stream: Stream, at date: Date = Date()) -> (now: Programme?, next: Programme?) {
-        guard let key = stream.guideKey, let list = channels[key] else { return (nil, nil) }
+        guard !channels.isEmpty else { return (nil, nil) }
+        let name = Stream.normalizedName(stream.title)
+        guard !name.isEmpty else { return (nil, nil) }
+        let exact = stream.country.flatMap { channels["\(name)|\($0)"] }
+        guard let list = exact ?? aliases[name].flatMap({ channels[$0] }) else { return (nil, nil) }
         let time = date.timeIntervalSince1970
         guard let index = list.firstIndex(where: { $0.e > time }) else { return (nil, nil) }
         let current = list[index].s <= time ? list[index] : nil

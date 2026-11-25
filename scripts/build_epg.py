@@ -8,7 +8,9 @@ import datetime as dt
 import gzip
 import io
 import json
+import re
 import sys
+import unicodedata
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -26,10 +28,28 @@ SOURCES = [
     "https://epgshare01.online/epgshare01/epg_ripper_CR1.xml.gz",
     "https://epgshare01.online/epgshare01/epg_ripper_DO1.xml.gz",
     "https://epgshare01.online/epgshare01/epg_ripper_ES1.xml.gz",
-    "https://epgshare01.online/epgshare01/epg_ripper_RAKUTEN_ES1.xml.gz",
     "https://epgshare01.online/epgshare01/epg_ripper_DIRECTVSPORTS1.xml.gz",
 ]
 HOURS_AHEAD = 20
+
+
+DROP = {"hd", "sd", "fhd", "uhd", "4k", "tv", "television", "channel", "canal"}
+
+
+def normalize(name):
+    """Debe coincidir con Stream.normalizedName en StreamCatalog.swift."""
+    name = re.sub(r"[\u2460-\u24ff]", "", name)
+    name = unicodedata.normalize("NFKD", name.lower())
+    name = "".join(c for c in name if not unicodedata.combining(c) and c.isascii())
+    name = re.sub(r"\([^)]*\)|\[[^\]]*\]", "", name)
+    return "".join(t for t in re.split(r"[^a-z0-9+]+", name) if t and t not in DROP)
+
+
+def channel_key(channel_id):
+    """'america.television.hd.(america.hd).pe' -> ('america', 'pe')."""
+    country = channel_id.rsplit(".", 1)[-1].lower() if "." in channel_id else ""
+    base = channel_id.split("(")[0].split("@")[0].replace(".", " ")
+    return normalize(base), country if len(country) == 2 else ""
 
 
 def parse_time(value):
@@ -77,8 +97,9 @@ def main(output):
                 continue
             if stop > now and start < limit:
                 title = (element.findtext("title") or "").strip()[:80]
-                key = element.get("channel", "").split("@")[0].strip().lower()
-                if key and title:
+                name, country = channel_key(element.get("channel", ""))
+                key = f"{name}|{country}"
+                if name and title:
                     channels.setdefault(key, []).append({"s": int(start), "e": int(stop), "t": title})
                     count += 1
             element.clear()
@@ -92,8 +113,14 @@ def main(output):
                 unique.append(item)
         channels[key] = unique
 
+    countries = {}
+    for key in channels:
+        name, country = key.split("|", 1)
+        countries.setdefault(name, []).append(key)
+    aliases = {name: keys[0] for name, keys in countries.items() if len(keys) == 1}
+
     with open(output, "w", encoding="utf-8") as handle:
-        json.dump({"generated": int(now), "channels": channels}, handle, ensure_ascii=False, separators=(",", ":"))
+        json.dump({"generated": int(now), "channels": channels, "aliases": aliases}, handle, ensure_ascii=False, separators=(",", ":"))
     print(f"{len(channels)} canales con guía")
 
 
